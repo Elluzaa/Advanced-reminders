@@ -1,201 +1,148 @@
 import tkinter as tk
-from tkinter import messagebox, filedialog, ttk
-import webbrowser
-import subprocess
-import threading
-import time
-from datetime import datetime, timedelta
+from tkinter import messagebox, simpledialog
 import json
 import os
-import pystray
-from PIL import Image
-
-REMINDER_FILE = "reminders.json"
+import time
+import threading
+import webbrowser
+import subprocess
+from datetime import datetime
+import schedule
+from plyer import notification  # ← Додано
 
 class ReminderApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Розумний Нагадувач")
-        self.root.geometry("500x550")
+        self.root.title("Нагадувач")
+        self.reminders = []
+        self.load_reminders()
 
-        self.tasks = []
-        self.selected_index = None
+        self.frame = tk.Frame(root)
+        self.frame.pack(padx=10, pady=10)
 
-        self.create_widgets()
-        self.load_tasks()
-        self.refresh_task_list()
+        self.listbox = tk.Listbox(self.frame, width=80)
+        self.listbox.pack()
 
-        threading.Thread(target=self.check_tasks, daemon=True).start()
-        threading.Thread(target=self.setup_tray, daemon=True).start()
+        btn_frame = tk.Frame(self.frame)
+        btn_frame.pack(pady=5)
 
-    def create_widgets(self):
-        tk.Label(self.root, text="Час (YYYY-MM-DD HH:MM):").pack()
-        self.entry_time = tk.Entry(self.root)
-        self.entry_time.pack()
+        tk.Button(btn_frame, text="Додати", command=self.add_reminder).grid(row=0, column=0, padx=5)
+        tk.Button(btn_frame, text="Редагувати", command=self.edit_reminder).grid(row=0, column=1, padx=5)
+        tk.Button(btn_frame, text="Видалити", command=self.delete_reminder).grid(row=0, column=2, padx=5)
 
-        tk.Label(self.root, text="Повідомлення:").pack()
-        self.entry_message = tk.Entry(self.root)
-        self.entry_message.pack()
+        self.update_listbox()
+        self.setup_schedule()
+        self.start_scheduler()
 
-        tk.Label(self.root, text="Посилання або програма:").pack()
-        self.entry_target = tk.Entry(self.root)
-        self.entry_target.pack()
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
 
-        self.browse_button = tk.Button(self.root, text="Огляд...", command=self.browse_file)
-        self.browse_button.pack(pady=2)
+    def show_notification(self, title, message):
+        notification.notify(
+            title=title,
+            message=message,
+            timeout=10  # в секундах
+        )
 
-        self.var_type = tk.StringVar(value="url")
-        tk.Radiobutton(self.root, text="Відкрити сайт", variable=self.var_type, value="url").pack()
-        tk.Radiobutton(self.root, text="Запустити програму", variable=self.var_type, value="program").pack()
+    def add_reminder(self):
+        time_str = simpledialog.askstring("Час", "Введіть час у форматі ГГ:ХХ (24-год):")
+        message = simpledialog.askstring("Повідомлення", "Введіть повідомлення:")
+        repeat = messagebox.askyesno("Повторення", "Повторювати щодня?")
+        action_type = simpledialog.askstring("Тип дії", "Введіть 'сайт' або 'програма':")
+        action_value = simpledialog.askstring("Шлях/URL", "Введіть URL або шлях до програми:")
 
-        tk.Label(self.root, text="Тип повторення:").pack()
-        self.combo_repeat = ttk.Combobox(self.root, values=["одноразове", "щодня", "щотижня"])
-        self.combo_repeat.set("одноразове")
-        self.combo_repeat.pack()
+        if time_str and message:
+            reminder = {
+                "time": time_str,
+                "message": message,
+                "repeat": repeat,
+                "action_type": action_type,
+                "action_value": action_value
+            }
+            self.reminders.append(reminder)
+            self.save_reminders()
+            self.update_listbox()
+            self.setup_schedule()
 
-        tk.Button(self.root, text="Зберегти / Оновити", command=self.add_task).pack(pady=5)
-        tk.Button(self.root, text="Видалити вибране", command=self.delete_task).pack(pady=2)
+    def edit_reminder(self):
+        index = self.listbox.curselection()
+        if index:
+            index = index[0]
+            reminder = self.reminders[index]
 
-        tk.Label(self.root, text="Нагадування:").pack()
-        self.listbox_tasks = tk.Listbox(self.root, height=10, width=70)
-        self.listbox_tasks.pack(pady=5)
-        self.listbox_tasks.bind("<<ListboxSelect>>", self.on_task_select)
+            time_str = simpledialog.askstring("Час", "Редагуйте час:", initialvalue=reminder["time"])
+            message = simpledialog.askstring("Повідомлення", "Редагуйте повідомлення:", initialvalue=reminder["message"])
+            repeat = messagebox.askyesno("Повторення", "Повторювати щодня?")
+            action_type = simpledialog.askstring("Тип дії", "Введіть 'сайт' або 'програма':", initialvalue=reminder["action_type"])
+            action_value = simpledialog.askstring("Шлях/URL", "Введіть URL або шлях до програми:", initialvalue=reminder["action_value"])
 
-    def browse_file(self):
-        file_path = filedialog.askopenfilename()
-        if file_path:
-            self.entry_target.delete(0, tk.END)
-            self.entry_target.insert(0, file_path)
-            self.var_type.set("program")
+            if time_str and message:
+                self.reminders[index] = {
+                    "time": time_str,
+                    "message": message,
+                    "repeat": repeat,
+                    "action_type": action_type,
+                    "action_value": action_value
+                }
+                self.save_reminders()
+                self.update_listbox()
+                self.setup_schedule()
 
-    def add_task(self):
-        time_str = self.entry_time.get()
-        message = self.entry_message.get()
-        target = self.entry_target.get()
-        task_type = self.var_type.get()
-        repeat = self.combo_repeat.get()
+    def delete_reminder(self):
+        index = self.listbox.curselection()
+        if index:
+            del self.reminders[index[0]]
+            self.save_reminders()
+            self.update_listbox()
+            self.setup_schedule()
 
-        if not time_str or not message or not target:
-            messagebox.showwarning("Увага", "Будь ласка, заповніть всі поля!")
-            return
+    def update_listbox(self):
+        self.listbox.delete(0, tk.END)
+        for r in self.reminders:
+            repeat_str = " (щодня)" if r["repeat"] else ""
+            self.listbox.insert(tk.END, f'{r["time"]} - {r["message"]}{repeat_str} [{r["action_type"]}]')
 
-        try:
-            datetime.strptime(time_str, "%Y-%m-%d %H:%M")
-        except ValueError:
-            messagebox.showerror("Помилка", "Формат дати: YYYY-MM-DD HH:MM")
-            return
+    def load_reminders(self):
+        if os.path.exists("reminders.json"):
+            with open("reminders.json", "r", encoding="utf-8") as f:
+                self.reminders = json.load(f)
 
-        new_task = {
-            "time": time_str,
-            "type": task_type,
-            "value": target,
-            "message": message,
-            "repeat": repeat
-        }
+    def save_reminders(self):
+        with open("reminders.json", "w", encoding="utf-8") as f:
+            json.dump(self.reminders, f, indent=4, ensure_ascii=False)
 
-        if self.selected_index is not None:
-            self.tasks[self.selected_index] = new_task
-            self.selected_index = None
-        else:
-            self.tasks.append(new_task)
+    def setup_schedule(self):
+        schedule.clear()
+        for r in self.reminders:
+            h, m = map(int, r["time"].split(":"))
+            if r["repeat"]:
+                schedule.every().day.at(r["time"]).do(self.open_task, r)
+            else:
+                today = datetime.now()
+                if today.hour == h and today.minute == m:
+                    self.open_task(r)
+                else:
+                    schedule.every().day.at(r["time"]).do(self.one_time_task, r)
 
-        self.save_tasks()
-        self.refresh_task_list()
-        self.clear_inputs()
-        messagebox.showinfo("OK", "Нагадування збережено!")
-
-    def on_task_select(self, event):
-        selected = self.listbox_tasks.curselection()
-        if selected:
-            idx = selected[0]
-            self.selected_index = idx
-            task = self.tasks[idx]
-            self.entry_time.delete(0, tk.END)
-            self.entry_time.insert(0, task["time"])
-            self.entry_message.delete(0, tk.END)
-            self.entry_message.insert(0, task["message"])
-            self.entry_target.delete(0, tk.END)
-            self.entry_target.insert(0, task["value"])
-            self.var_type.set(task["type"])
-            self.combo_repeat.set(task.get("repeat", "одноразове"))
-
-    def delete_task(self):
-        selected = self.listbox_tasks.curselection()
-        if selected:
-            idx = selected[0]
-            confirm = messagebox.askyesno("Підтвердження", "Видалити це нагадування?")
-            if confirm:
-                del self.tasks[idx]
-                self.save_tasks()
-                self.refresh_task_list()
-                self.clear_inputs()
-                self.selected_index = None
-
-    def refresh_task_list(self):
-        self.listbox_tasks.delete(0, tk.END)
-        for idx, task in enumerate(self.tasks):
-            self.listbox_tasks.insert(tk.END, f"{idx+1}. {task['time']} | {task['message']}")
-
-    def clear_inputs(self):
-        self.entry_time.delete(0, tk.END)
-        self.entry_message.delete(0, tk.END)
-        self.entry_target.delete(0, tk.END)
-        self.var_type.set("url")
-        self.combo_repeat.set("одноразове")
-
-    def check_tasks(self):
-        while True:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            for task in self.tasks[:]:
-                if task["time"] == now:
-                    self.open_task(task)
-                    if task["repeat"] == "одноразове":
-                        self.tasks.remove(task)
-                    else:
-                        dt = datetime.strptime(task["time"], "%Y-%m-%d %H:%M")
-                        if task["repeat"] == "щодня":
-                            dt += timedelta(days=1)
-                        elif task["repeat"] == "щотижня":
-                            dt += timedelta(weeks=1)
-                        task["time"] = dt.strftime("%Y-%m-%d %H:%M")
-            self.save_tasks()
-            self.refresh_task_list()
-            time.sleep(30)
+    def one_time_task(self, task):
+        self.open_task(task)
+        self.reminders.remove(task)
+        self.save_reminders()
+        self.update_listbox()
 
     def open_task(self, task):
-        if task["type"] == "url":
-            webbrowser.open(task["value"])
-        elif task["type"] == "program":
-            try:
-                subprocess.Popen(task["value"])
-            except Exception as e:
-                print("Помилка запуску програми:", e)
-        messagebox.showinfo("Нагадування", task["message"])
+        self.show_notification("Нагадування", task["message"])
+        if task["action_type"] == "сайт":
+            webbrowser.open(task["action_value"])
+        elif task["action_type"] == "програма":
+            subprocess.Popen(task["action_value"], shell=True)
 
-    def save_tasks(self):
-        with open(REMINDER_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.tasks, f, ensure_ascii=False, indent=4)
+    def check_reminders(self):
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
 
-    def load_tasks(self):
-        if os.path.exists(REMINDER_FILE):
-            with open(REMINDER_FILE, "r", encoding="utf-8") as f:
-                self.tasks = json.load(f)
-
-    def setup_tray(self):
-        def on_show():
-            self.root.after(0, self.root.deiconify)
-
-        def on_quit():
-            self.icon.stop()
-            self.root.quit()
-
-        image = Image.open("reminder_icon.png")
-        self.icon = pystray.Icon("reminder", image, "Нагадувач", menu=pystray.Menu(
-            pystray.MenuItem("Відкрити", on_show),
-            pystray.MenuItem("Вийти", on_quit)
-        ))
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
-        self.icon.run()
+    def start_scheduler(self):
+        threading.Thread(target=self.check_reminders, daemon=True).start()
 
     def hide_window(self):
         self.root.withdraw()
