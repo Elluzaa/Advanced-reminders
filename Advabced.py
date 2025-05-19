@@ -17,7 +17,7 @@ class ReminderApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Розумний Нагадувач")
-        self.root.geometry("500x550")
+        self.root.geometry("420x600")
 
         self.tasks = []
         self.selected_index = None
@@ -103,7 +103,6 @@ class ReminderApp:
         self.save_tasks()
         self.refresh_task_list()
         self.clear_inputs()
-        messagebox.showinfo("OK", "Нагадування збережено!")
 
     def on_task_select(self, event):
         selected = self.listbox_tasks.curselection()
